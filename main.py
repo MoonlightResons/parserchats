@@ -7,8 +7,7 @@ import asyncio
 import random
 
 from telethon.tl.functions.messages import GetHistoryRequest, GetDialogsRequest
-from telethon.tl.types import InputPeerEmpty, Chat, Channel, PeerUser, PeerChannel
-
+from telethon.tl.types import InputPeerEmpty, Chat, Channel, PeerUser, PeerChannel, KeyboardButton, ReplyKeyboardMarkup
 
 api_id = 24009406
 api_hash = "56b5dee1246cd87bdcd6fcc1049ae95c"
@@ -21,6 +20,13 @@ bot = TelegramClient('bot', api_id, api_hash).start(bot_token=bot_token)
 
 tasks = {}
 
+
+def start_button():
+    buttons = [
+        [Button.inline('Аккаунты', b'accounts'), Button.inline('Проекты', b'projects')]
+    ]
+
+    return buttons
 def session_generate():
     session = random.randint(1, 10000000)
     return session
@@ -96,7 +102,6 @@ def add_project(user_id: int, account: int, project_name: str, off: str):
     cursor.execute('INSERT INTO projects (user_id, account, project_name, off) VALUES (?, ?, ?, ?)', (user_id, account, project_name, off,))
     conn.commit()
 
-
 async def message_parser(event, project_id):
     project = get_project_by_id(project_id)
     keyword = project['keyword']
@@ -168,14 +173,8 @@ async def message_parser(event, project_id):
 
         print(f"Найдено сообщений с ключевым словом '{keyword}': {total_messages}")
 
-        # Отправляем информацию о количестве найденных сообщений
-        # if total_messages > 0:
-        #     await event.respond(f"Найдено сообщений с ключевым словом '{keyword}': {total_messages}")
-        # else:
-        #     await event.respond(f"Не найдено сообщений с ключевым словом '{keyword}'.")
-
         # Записываем новые ID сообщений в файл
-        with open(f"{phone}.txt", "a") as file:
+        with open(f"{phone}.txt", "w") as file:
             for message_id in processed_message_ids:
                 file.write(f"{message_id}\n")
 
@@ -194,18 +193,19 @@ async def start(event):
     connection_with_user(user_id)
 
     buttons = [
-        [Button.inline('Аккаунты', b'accounts'), Button.inline('Проекты', b'projects')]
+        [KeyboardButton('Аккаунты'), KeyboardButton('Проекты')]
     ]
 
     await event.respond('Добро пожаловать!', buttons=buttons)
 
 
 # Callback handler
-@bot.on(events.CallbackQuery)
-async def callback(event):
+@bot.on(events.NewMessage)
+async def handle_buttons(event):
     user_id = event.sender_id
+    text = event.raw_text
 
-    if event.data == b'accounts':
+    if text == 'Аккаунты':
         accounts = get_accounts_by_user_id(user_id)
 
         if len(accounts) == 0:
@@ -216,11 +216,11 @@ async def callback(event):
             buttons = [
                 [Button.inline(str(account[1]), b'account_' + str(account[0]).encode('utf-8'))] for account in accounts
             ]
-            buttons.append([Button.inline('Добавить аккаунт', b'add_account')])  # Добавляем кнопку "Добавить аккаунт"
-
+            buttons.append([Button.inline('Добавить аккаунт', b'add_account')])
+            buttons.append([Button.inline('Назад', b'back_to_main')])
             await event.respond('Ваши аккаунты:', buttons=buttons)
 
-    elif event.data == b'projects':
+    elif text == 'Проекты':
         projects = get_projects_by_user_id(user_id)
 
         if len(projects) == 0:
@@ -229,14 +229,18 @@ async def callback(event):
             ])
         else:
             buttons = [
-                [Button.inline(str(project['name']), b'project_' + str(project['id']).encode('utf-8'))] for project in
-                projects
+                [Button.inline(str(project['name']), b'project_' + str(project['id']).encode('utf-8'))] for project in projects
             ]
             buttons.append([Button.inline('Добавить проект', b'add_project')])  # Добавляем кнопку "Добавить проект"
-
+            buttons.append([Button.inline('Назад', b'back_to_main')])
             await event.respond('Ваши проекты:', buttons=buttons)
 
-    elif event.data == b'add_account':
+# Callback handler для inline-кнопок
+@bot.on(events.CallbackQuery)
+async def callback(event):
+    user_id = event.sender_id
+
+    if event.data == b'add_account':
         async with bot.conversation(event.sender_id) as conv:
             await conv.send_message('Введите номер для регистрации')  # Send prompt message first
             phone_number = await conv.get_response()  # Then get response
@@ -331,12 +335,12 @@ async def callback(event):
             ])
         else:
             buttons = [
-                [Button.inline(str(project['name']), b'project_' + str(project['id']).encode('utf-8'))] for project in
-                projects
+                [Button.inline(str(project['name']), b'project_' + str(project['id']).encode('utf-8'))] for project in projects
             ]
             buttons.append([Button.inline('Добавить проект', b'add_project')])  # Добавляем кнопку "Добавить проект"
-
+            buttons.append([Button.inline('Назад', b'back_to_main')])
             await event.respond('Ваши проекты:', buttons=buttons)
+
 
 
 async def start_login_process(user_id, phone_number, conv):
@@ -364,7 +368,7 @@ async def complete_login(user_id, client, phone_number, code, conv):
         random_session = session_generate()
         add_account(user_id, phone_number, "True", random_session)
         account_update(random_session, "True")
-        await conv.send_message('Аккаунт успешно добавлен')
+        await conv.send_message('Аккаунт успешно добавлен', buttons=start_button())
     except PhoneNumberInvalidError:
         await conv.send_message('Код подтверждения неверен. Пожалуйста, попробуйте снова.')
     except Exception as e:
