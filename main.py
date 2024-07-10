@@ -1,13 +1,13 @@
 import os
 import sqlite3
 from telethon import TelegramClient, events, Button
-from telethon.errors import PhoneNumberInvalidError
-from telethon.sessions import StringSession
 import asyncio
 import random
 
 from telethon.tl.functions.messages import GetHistoryRequest, GetDialogsRequest
 from telethon.tl.types import InputPeerEmpty, Chat, Channel, PeerUser, PeerChannel, KeyboardButton, ReplyKeyboardMarkup
+from telethon.errors import PhoneNumberInvalidError, SessionPasswordNeededError
+
 
 api_id = 24009406
 api_hash = "56b5dee1246cd87bdcd6fcc1049ae95c"
@@ -342,7 +342,6 @@ async def callback(event):
             await event.respond('Ваши проекты:', buttons=buttons)
 
 
-
 async def start_login_process(user_id, phone_number, conv):
     session_name = f"{phone_number}.session"
     client = TelegramClient(session_name, api_id, api_hash)
@@ -356,10 +355,13 @@ async def start_login_process(user_id, phone_number, conv):
             await complete_login(user_id, client, phone_number, code.text, conv)
     except PhoneNumberInvalidError:
         await conv.send_message('Код подтверждения устарел. Пожалуйста, запросите новый код и попробуйте снова.')
+    except SessionPasswordNeededError:
+        await conv.send_message('Отключите двухфакторную аутентификацию и попробуйте снова.')
     except Exception as e:
         await conv.send_message(f'Ошибка при добавлении аккаунта: {str(e)}')
     finally:
         await client.disconnect()
+
 
 async def complete_login(user_id, client, phone_number, code, conv):
     try:
@@ -371,9 +373,10 @@ async def complete_login(user_id, client, phone_number, code, conv):
         await conv.send_message('Аккаунт успешно добавлен', buttons=start_button())
     except PhoneNumberInvalidError:
         await conv.send_message('Код подтверждения неверен. Пожалуйста, попробуйте снова.')
+    except SessionPasswordNeededError:
+        await conv.send_message('Отключите двухфакторную аутентификацию и попробуйте снова.')
     except Exception as e:
         await conv.send_message(f'Ошибка при добавлении аккаунта: {str(e)}')
-
 
 def main():
     bot.run_until_disconnected()
