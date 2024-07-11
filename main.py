@@ -41,8 +41,7 @@ def get_user_id(user_id: int) -> bool:
 def get_accounts_by_user_id(user_id: int):
     cursor.execute('SELECT id, number FROM accounts WHERE user_id = ?', (user_id,))
     result = cursor.fetchall()
-    return result
-
+    return [{'id': row[0], 'name': row[1]} for row in result]
 
 def get_projects_by_user_id(user_id: int):
     cursor.execute('SELECT id, project_name, account, keyword, off FROM projects WHERE user_id = ?', (user_id,))
@@ -56,8 +55,19 @@ def get_project_by_id(project_id: int):
     return {'name': result[0], 'account': result[1], 'keyword': result[2], 'off': result[3]}
 
 
+def get_account_by_id(account_id: int):
+    cursor.execute('SELECT number FROM accounts WHERE id = ?', (account_id,))
+    result = cursor.fetchone()
+    return {'name': result[0]}
+
+
 def delete_project(project_id: int):
     cursor.execute('DELETE FROM projects WHERE id = ?', (project_id,))
+    conn.commit()
+
+
+def delete_account(account_id: int):
+    cursor.execute('DELETE FROM accounts WHERE id = ?', (account_id,))
     conn.commit()
 
 
@@ -214,7 +224,7 @@ async def handle_buttons(event):
             ])
         else:
             buttons = [
-                [Button.inline(str(account[1]), b'account_' + str(account[0]).encode('utf-8'))] for account in accounts
+                [Button.inline(str(account['name']), b'account_' + str(account['id']).encode('utf-8'))] for account in accounts
             ]
             buttons.append([Button.inline('Добавить аккаунт', b'add_account')])
             buttons.append([Button.inline('Назад', b'back_to_main')])
@@ -248,6 +258,18 @@ async def callback(event):
             await conv.send_message('Отправка кода на указанный номер...')
             await start_login_process(user_id, phone_number.text, conv)
 
+    elif event.data.startswith(b'account_'):
+        account_id = int(event.data.decode('utf-8').split('_')[1])
+        account = get_account_by_id(account_id)
+
+        account_info = (f'Номер: {account["name"]}')
+
+        buttons = [
+            [Button.inline('Удалить', b'delete_account_' + str(account_id).encode('utf-8'))],
+        ]
+
+        await event.respond(account_info, buttons=buttons)
+
     elif event.data == b'add_project':
         async with bot.conversation(event.sender_id) as conv:
             accounts = get_accounts_by_user_id(user_id)
@@ -255,7 +277,7 @@ async def callback(event):
                 await conv.send_message('У вас нет ни одного аккаунта для привязки проекта.')
                 return
 
-            account_buttons = [[Button.inline(str(account[1]), b'select_account_' + str(account[0]).encode('utf-8'))]
+            account_buttons = [[Button.inline(str(account['name']), b'select_account_' + str(account['id']).encode('utf-8'))]
                                for account in accounts]
             await conv.send_message('Выберите аккаунт для проекта:', buttons=account_buttons)
 
@@ -292,6 +314,16 @@ async def callback(event):
         project_id = int(event.data.decode('utf-8').split('_')[2])
         delete_project(project_id)
         await event.respond('Проект удален')
+
+    elif event.data.startswith(b'delete_account_'):
+        account_id = int(event.data.decode('utf-8').split('_')[2])
+        account = get_account_by_id(account_id)
+        phone = account['name']
+        session_name = f'{phone}.session'
+        delete_account(account_id)
+        await event.respond('Аккаунт удален')
+        if os.path.exists(session_name):
+            os.remove(session_name)
 
     elif event.data.startswith(b'toggle_project_'):
         project_id = int(event.data.decode('utf-8').split('_')[2])
@@ -355,28 +387,42 @@ async def start_login_process(user_id, phone_number, conv):
             await complete_login(user_id, client, phone_number, code.text, conv)
     except PhoneNumberInvalidError:
         await conv.send_message('Код подтверждения устарел. Пожалуйста, запросите новый код и попробуйте снова.')
+        if os.path.exists(session_name):
+            os.remove(session_name)
     except SessionPasswordNeededError:
         await conv.send_message('Отключите двухфакторную аутентификацию и попробуйте снова.')
+        if os.path.exists(session_name):
+            os.remove(session_name)
     except Exception as e:
         await conv.send_message(f'Ошибка при добавлении аккаунта: {str(e)}')
+        if os.path.exists(session_name):
+            os.remove(session_name)
     finally:
         await client.disconnect()
-
 
 async def complete_login(user_id, client, phone_number, code, conv):
     try:
         await client.sign_in(phone_number, code)
+        session_name = f"{phone_number}.session"
         session_str = client.session.save()  # Сохранение сессии
         random_session = session_generate()
         add_account(user_id, phone_number, "True", random_session)
         account_update(random_session, "True")
-        await conv.send_message('Аккаунт успешно добавлен', buttons=start_button())
+        await conv.send_message('Аккаунт успешно добавлен')
     except PhoneNumberInvalidError:
         await conv.send_message('Код подтверждения неверен. Пожалуйста, попробуйте снова.')
+        if os.path.exists(session_name):
+            os.remove(session_name)
     except SessionPasswordNeededError:
         await conv.send_message('Отключите двухфакторную аутентификацию и попробуйте снова.')
+        if os.path.exists(session_name):
+            os.remove(session_name)
     except Exception as e:
         await conv.send_message(f'Ошибка при добавлении аккаунта: {str(e)}')
+        if os.path.exists(session_name):
+            os.remove(session_name)
+    finally:
+        await client.disconnect()
 
 
 def main():
