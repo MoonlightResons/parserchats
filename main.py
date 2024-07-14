@@ -1,24 +1,38 @@
+import json
 import os
 import sqlite3
+
+import telebot
 from telethon import TelegramClient, events, Button
 import asyncio
 import random
 
-from telethon.tl.functions.messages import GetHistoryRequest, GetDialogsRequest
-from telethon.tl.types import InputPeerEmpty, Chat, Channel, PeerUser, PeerChannel, KeyboardButton, ReplyKeyboardMarkup
-from telethon.errors import PhoneNumberInvalidError, SessionPasswordNeededError
+from telethon.tl.functions.messages import GetHistoryRequest, GetDialogsRequest, DeleteMessagesRequest
+from telethon.tl.types import InputPeerEmpty, Chat, Channel, PeerUser, PeerChannel, KeyboardButton, ReplyKeyboardMarkup, \
+    KeyboardButtonRow
+from telethon.errors import PhoneNumberInvalidError, SessionPasswordNeededError, MessageDeleteForbiddenError
 
-
-api_id = 24009406
-api_hash = "56b5dee1246cd87bdcd6fcc1049ae95c"
+api_id = 29302356
+api_hash = "7d7f24983b3bea974a0997c5c42a1d44"
 bot_token = '7443055955:AAE7J-qmYmR-1HH8hm6IyhXOd4kWGPs7dcM'
 
 conn = sqlite3.connect('database', check_same_thread=False)
 cursor = conn.cursor()
 
 bot = TelegramClient('bot', api_id, api_hash).start(bot_token=bot_token)
+bot_tb = telebot.TeleBot(token=bot_token)
 
 tasks = {}
+
+
+async def delete_messages(user_id, message_ids):
+    for message_id in message_ids:
+        try:
+            await bot.delete_messages(user_id, message_id)
+        except MessageDeleteForbiddenError:
+            print(f"Cannot delete message {message_id}: Forbidden")
+        except Exception as e:
+            print(f"Error deleting message {message_id}: {e}")
 
 
 def start_button():
@@ -27,6 +41,8 @@ def start_button():
     ]
 
     return buttons
+
+
 def session_generate():
     session = random.randint(1, 10000000)
     return session
@@ -39,9 +55,19 @@ def get_user_id(user_id: int) -> bool:
 
 # Function to get accounts by user_id
 def get_accounts_by_user_id(user_id: int):
-    cursor.execute('SELECT id, number FROM accounts WHERE user_id = ?', (user_id,))
+    query = "SELECT id, number FROM accounts WHERE user_id = ? AND confirm = ?"
+    cursor.execute(query, (user_id, "True"))
     result = cursor.fetchall()
     return [{'id': row[0], 'name': row[1]} for row in result]
+
+
+def get_confirm_by_user_id(user_id):
+    # Assuming you have a database connection established
+    query = "SELECT * FROM accounts WHERE user_id = ? AND confirm = ?"
+    cursor.execute(query, (user_id, "True"))
+    accounts = cursor.fetchall()
+    return accounts
+
 
 def get_projects_by_user_id(user_id: int):
     cursor.execute('SELECT id, project_name, account, keyword, off FROM projects WHERE user_id = ?', (user_id,))
@@ -81,15 +107,16 @@ def toggle_project_get_state(project_id: int):
     current_state = cursor.fetchone()[0]
     return current_state
 
+
 def update_project_keyword(project_id: int, keyword: str):
     cursor.execute('UPDATE projects SET keyword = ? WHERE id = ?', (keyword, project_id))
     conn.commit()
 
 
 # Function to add a new user
-def connection_with_user(user_id: int):
+def connection_with_user(user_id: int, message_ids: list):
     if not get_user_id(user_id):
-        cursor.execute('INSERT INTO user_profile (user_id) VALUES (?)', (user_id,))
+        cursor.execute('INSERT INTO user_profile (user_id, message_ids) VALUES (?, ?)', (user_id, json.dumps(message_ids)))
         conn.commit()
         print(f"User {user_id} added to database.")
     else:
@@ -111,6 +138,64 @@ def account_update(confirm: str, session: int):
 def add_project(user_id: int, account: int, project_name: str, off: str):
     cursor.execute('INSERT INTO projects (user_id, account, project_name, off) VALUES (?, ?, ?, ?)', (user_id, account, project_name, off,))
     conn.commit()
+
+
+def update_message_id(user_id: int, message_id: int):
+    cursor.execute('SELECT message_ids FROM user_profile WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+
+    if result and isinstance(result[0], str):
+        try:
+            message_ids = json.loads(result[0])  # Convert the stored string back to a list
+        except json.JSONDecodeError:
+            message_ids = []
+    else:
+        message_ids = []
+
+    message_ids.append(message_id)  # Add the new message_id to the list
+    cursor.execute('UPDATE user_profile SET message_ids = ? WHERE user_id = ?',
+                   (json.dumps(message_ids), user_id))  # Convert the list back to a string
+    conn.commit()
+
+
+def clear_all_message_ids(user_id: int):
+    cursor.execute("SELECT message_ids FROM user_profile WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+
+    if result:
+        message_ids = json.loads(result[0])
+        # Clear the message_ids list
+        message_ids.clear()
+        # Update the database with the cleared list
+        cursor.execute("UPDATE user_profile SET message_ids = ? WHERE user_id = ?", (json.dumps(message_ids), user_id))
+        conn.commit()
+
+
+def get_message_from_profile(user_id: int):
+    cursor.execute("SELECT message_ids FROM user_profile WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    if result:
+        return json.loads(result[0])  # Convert the stored JSON string back to a list
+    return []
+
+
+async def project_get_button(event, project_id, project):
+    user_id = event.sender_id
+    project_info = (f"Название проекта: {project['name']}\n"
+                    f"Привязанный номер: {project['account']}\n"
+                    f"Ключевое слово: {'Нету' if project['keyword'] is None else project['keyword']}")
+
+    buttons = [
+        [Button.inline('Удалить', b'delete_project_' + str(project_id).encode('utf-8'))],
+        [Button.inline('Выкл' if project['off'] == "False" else 'Вкл',
+                       b'toggle_project_' + str(project_id).encode('utf-8'))],
+        [Button.inline('Ключевое слово', b'keyword_project_' + str(project_id).encode('utf-8'))],
+        [Button.inline('Назад', b'cancel_proj')]
+    ]
+
+    message = await event.respond(project_info, buttons=buttons)
+    update_message_id(user_id, message.id)
+
 
 async def message_parser(event, project_id):
     project = get_project_by_id(project_id)
@@ -191,71 +276,169 @@ async def message_parser(event, project_id):
     await parse_messages()
     await client.disconnect()
 
+
 async def periodic_parser(event, project_id):
     while True:
         await message_parser(event, project_id)
         await asyncio.sleep(60)  # Запускать парсинг каждые 1 минуту
 
 
+def start_buttons():
+    keyboard_buttons = ReplyKeyboardMarkup(
+        [
+            KeyboardButtonRow(
+                [
+                    KeyboardButton(text='Аккаунты'),
+                    KeyboardButton(text="Проекты")
+                ]
+            )
+        ],
+        resize=True
+    )
+
+    return keyboard_buttons
+
+
+async def accounts_button(user_id, conv):
+    accounts = get_accounts_by_user_id(user_id)
+
+    if len(accounts) == 0:
+        message1 = await conv.send_message('У вас нет ни одного аккаунта', buttons=[
+            [Button.inline('Добавить аккаунт', b'add_account')]
+        ])
+        update_message_id(user_id, message1.id)
+    else:
+        buttons = [
+            [Button.inline(str(account['name']), b'account_' + str(account['id']).encode('utf-8'))] for account in accounts
+        ]
+        buttons.append([Button.inline('Добавить аккаунт', b'add_account')])
+
+        message2 = await conv.send_message('Ваши аккаунты:', buttons=buttons)
+        update_message_id(user_id, message2.id)
+
+
+async def accounts_button_event(user_id, event):
+    accounts = get_accounts_by_user_id(user_id)
+
+    if len(accounts) == 0:
+        message1 = await event.respond('У вас нет ни одного аккаунта', buttons=[
+            [Button.inline('Добавить аккаунт', b'add_account')]
+        ])
+        update_message_id(user_id, message1.id)
+    else:
+        buttons = [
+            [Button.inline(str(account['name']), b'account_' + str(account['id']).encode('utf-8'))] for account in accounts
+        ]
+        buttons.append([Button.inline('Добавить аккаунт', b'add_account')])
+
+        message2 = await event.respond('Ваши аккаунты:', buttons=buttons)
+        update_message_id(user_id, message2.id)
+
+
+async def projects_button(user_id, conv):
+    projects = get_projects_by_user_id(user_id)
+
+    if len(projects) == 0:
+        message1 = await conv.send_message('У вас нет ни одного проекта', buttons=[
+            [Button.inline('Добавить проект', b'add_project')]
+        ])
+        update_message_id(user_id, message1.id)
+    else:
+        buttons = [
+            [Button.inline(str(project['name']), b'project_' + str(project['id']).encode('utf-8'))] for project in
+            projects
+        ]
+        buttons.append([Button.inline('Добавить проект', b'add_project')])
+
+        message2 = await conv.send_message('Ваши аккаунты:', buttons=buttons)
+        update_message_id(user_id, message2.id)
+
+
+async def projects_button_event(user_id, event):
+    projects = get_projects_by_user_id(user_id)
+
+    if len(projects) == 0:
+        message1 = await event.respond('У вас нет ни одного проекта', buttons=[
+            [Button.inline('Добавить проект', b'add_project')]
+        ])
+        update_message_id(user_id, message1.id)
+    else:
+        buttons = [
+            [Button.inline(str(project['name']), b'project_' + str(project['id']).encode('utf-8'))] for project in
+            projects
+        ]
+        buttons.append([Button.inline('Добавить проект', b'add_project')])
+
+        message2 = await event.respond('Ваши аккаунты:', buttons=buttons)
+        update_message_id(user_id, message2.id)
+
+
 @bot.on(events.NewMessage(pattern='/start'))
 async def start(event):
     user_id = event.sender_id
-    connection_with_user(user_id)
+    # all_messages = get_message_from_profile(user_id)
+    # await delete_messages(user_id, all_messages)
+    # clear_all_message_ids(user_id)
+    connection_with_user(user_id, [])
 
-    buttons = [
-        [KeyboardButton('Аккаунты'), KeyboardButton('Проекты')]
-    ]
-
-    await event.respond('Добро пожаловать!', buttons=buttons)
+    await event.respond('Добро пожаловать!', buttons=start_buttons())
+    # update_message_id(user_id, message.id)
 
 
-# Callback handler
 @bot.on(events.NewMessage)
 async def handle_buttons(event):
     user_id = event.sender_id
     text = event.raw_text
+    accounts = get_accounts_by_user_id(user_id)
 
     if text == 'Аккаунты':
-        accounts = get_accounts_by_user_id(user_id)
-
         if len(accounts) == 0:
-            await event.respond('У вас нет ни одного аккаунта', buttons=[
+            message1 = await event.respond('У вас нет ни одного аккаунта', buttons=[
                 [Button.inline('Добавить аккаунт', b'add_account')]
             ])
+            update_message_id(user_id, message1.id)
         else:
             buttons = [
-                [Button.inline(str(account['name']), b'account_' + str(account['id']).encode('utf-8'))] for account in accounts
+                [Button.inline(str(account['name']), b'account_' + str(account['id']).encode('utf-8'))] for account in
+                accounts
             ]
             buttons.append([Button.inline('Добавить аккаунт', b'add_account')])
-            buttons.append([Button.inline('Назад', b'back_to_main')])
-            await event.respond('Ваши аккаунты:', buttons=buttons)
+
+            message2 = await event.respond('Ваши аккаунты:', buttons=buttons)
+            update_message_id(user_id, message2.id)
 
     elif text == 'Проекты':
+        all_messages = get_message_from_profile(user_id)
         projects = get_projects_by_user_id(user_id)
+        await delete_messages(user_id, all_messages)
+        clear_all_message_ids(user_id)
 
         if len(projects) == 0:
-            await event.respond('У вас нет ни одного проекта', buttons=[
+            message1 = await event.respond('У вас нет ни одного проекта', buttons=[
                 [Button.inline('Добавить проект', b'add_project')]
             ])
+            update_message_id(user_id, message1.id)
         else:
             buttons = [
                 [Button.inline(str(project['name']), b'project_' + str(project['id']).encode('utf-8'))] for project in projects
             ]
             buttons.append([Button.inline('Добавить проект', b'add_project')])  # Добавляем кнопку "Добавить проект"
-            buttons.append([Button.inline('Назад', b'back_to_main')])
-            await event.respond('Ваши проекты:', buttons=buttons)
+            message = await event.respond('Ваши проекты:', buttons=buttons)
+            update_message_id(user_id, message.id)
 
-# Callback handler для inline-кнопок
+
 @bot.on(events.CallbackQuery)
 async def callback(event):
     user_id = event.sender_id
 
     if event.data == b'add_account':
         async with bot.conversation(event.sender_id) as conv:
-            await conv.send_message('Введите номер для регистрации')  # Send prompt message first
+            message1 = await conv.send_message('Введите номер для регистрации')
+            update_message_id(user_id, message1.id)
             phone_number = await conv.get_response()  # Then get response
 
-            await conv.send_message('Отправка кода на указанный номер...')
+            message2 = await conv.send_message('Отправка кода на указанный номер...')
+            update_message_id(user_id, message2.id)
             await start_login_process(user_id, phone_number.text, conv)
 
     elif event.data.startswith(b'account_'):
@@ -268,18 +451,21 @@ async def callback(event):
             [Button.inline('Удалить', b'delete_account_' + str(account_id).encode('utf-8'))],
         ]
 
-        await event.respond(account_info, buttons=buttons)
+        message = await event.respond(account_info, buttons=buttons)
+        update_message_id(user_id, message.id)
 
     elif event.data == b'add_project':
         async with bot.conversation(event.sender_id) as conv:
             accounts = get_accounts_by_user_id(user_id)
             if len(accounts) == 0:
-                await conv.send_message('У вас нет ни одного аккаунта для привязки проекта.')
+                message = await conv.send_message('У вас нет ни одного аккаунта для привязки проекта.')
+                update_message_id(user_id, message.id)
                 return
 
             account_buttons = [[Button.inline(str(account['name']), b'select_account_' + str(account['id']).encode('utf-8'))]
                                for account in accounts]
-            await conv.send_message('Выберите аккаунт для проекта:', buttons=account_buttons)
+            message1 = await conv.send_message('Выберите аккаунт для проекта:', buttons=account_buttons)
+            update_message_id(user_id, message1.id)
 
             account_response = await conv.wait_event(events.CallbackQuery)
             selected_account = int(account_response.data.decode('utf-8').split('_')[2])
@@ -287,10 +473,15 @@ async def callback(event):
             cursor.execute('SELECT number FROM accounts WHERE id = ?', (selected_account,))
             selected_account_number = cursor.fetchone()[0]
 
-            await conv.send_message('Введите название проекта')
+            message2 = await conv.send_message('Введите название проекта')
+            update_message_id(user_id, message2.id)
             project_name = await conv.get_response()
             add_project(user_id, selected_account_number, project_name.text, "False")
-            await conv.send_message('Проект успешно добавлен')
+            all_messages = get_message_from_profile(user_id)
+            message4 = await conv.send_message('Проект успешно добавлен')
+            await projects_button(user_id, conv)
+            await delete_messages(user_id, all_messages)
+            update_message_id(user_id, message4 .id)
 
     elif event.data.startswith(b'project_'):
         project_id = int(event.data.decode('utf-8').split('_')[1])
@@ -308,12 +499,18 @@ async def callback(event):
             [Button.inline('Назад', b'cancel_proj')]
         ]
 
-        await event.respond(project_info, buttons=buttons)
+        message = await event.respond(project_info, buttons=buttons)
+        update_message_id(user_id, message.id)
 
     elif event.data.startswith(b'delete_project_'):
         project_id = int(event.data.decode('utf-8').split('_')[2])
         delete_project(project_id)
-        await event.respond('Проект удален')
+        all_messages = get_message_from_profile(user_id)
+        message = await event.respond('Проект удален')
+        await delete_messages(user_id, all_messages)
+        clear_all_message_ids(user_id)
+        update_message_id(user_id, message.id)
+        await projects_button_event(user_id, event)
 
     elif event.data.startswith(b'delete_account_'):
         account_id = int(event.data.decode('utf-8').split('_')[2])
@@ -321,7 +518,12 @@ async def callback(event):
         phone = account['name']
         session_name = f'{phone}.session'
         delete_account(account_id)
-        await event.respond('Аккаунт удален')
+        message = await event.respond('Аккаунт удален')
+        all_messages = get_message_from_profile(user_id)
+        await delete_messages(user_id, all_messages)
+        clear_all_message_ids(user_id)
+        update_message_id(user_id, message.id)
+        await accounts_button_event(user_id, event)
         if os.path.exists(session_name):
             os.remove(session_name)
 
@@ -330,17 +532,26 @@ async def callback(event):
         project = get_project_by_id(project_id)
         get_state = toggle_project_get_state(project_id)
         if project['keyword'] is None:
-            await event.respond('Для того что бы включить парсер добавьте ключевое слово')
+            message = await event.respond('Для того что бы включить парсер добавьте ключевое слово')
+            update_message_id(user_id, message.id)
         else:
             if get_state == "False":
                 toggle_project(project_id, "True")
-                await event.respond('Вы успешно запустили парсер')
-                # await message_parser(event, project_id)
+                message1 = await event.respond('Вы успешно запустили парсер')
+                update_message_id(user_id, message1.id)
+                all_messages = get_message_from_profile(user_id)
+                await delete_messages(user_id, all_messages)
                 task = bot.loop.create_task(periodic_parser(event, project_id))
                 tasks[project_id] = task
+                await project_get_button(event=event, project_id=project_id, project=project)
             else:
                 toggle_project(project_id, "False")
-                await event.respond('Вы успешно выключили парсер')
+                message2 = await event.respond('Вы успешно выключили парсер')
+                update_message_id(user_id, message2.id)
+                all_messages = get_message_from_profile(user_id)
+                await delete_messages(user_id, all_messages)
+                clear_all_message_ids(user_id)
+                await project_get_button(event=event, project_id=project_id, project=project)
                 if project_id in tasks:
                     tasks[project_id].cancel()
                     del tasks[project_id]
@@ -348,30 +559,29 @@ async def callback(event):
                 file_path = f"{phone}.txt"
                 if os.path.exists(file_path):
                     os.remove(file_path)
-                await event.respond('Состояние проекта изменено')
+                message3 = await event.respond('Состояние проекта изменено')
+                update_message_id(user_id, message3.id)
 
     elif event.data.startswith(b'keyword_project_'):
+        user_id = event.sender_id
         project_id = int(event.data.decode('utf-8').split('_')[2])
+
         async with bot.conversation(event.sender_id) as conv:
-            await conv.send_message('Введите новое ключевое слово')
+            message1 = await conv.send_message('Введите новое ключевое слово')
             keyword = await conv.get_response()
+            update_message_id(user_id, message1.id)
             update_project_keyword(project_id, keyword.text)
-            await conv.send_message('Ключевое слово обновлено')
+            message2 = await conv.send_message('Ключевое слово обновлено')
+            all_messages = get_message_from_profile(user_id)
+            await delete_messages(user_id, all_messages)
+            clear_all_message_ids(user_id)
+            await projects_button(user_id, conv)
+            update_message_id(user_id, message2.id)
 
     elif event.data == b'cancel_proj':
-        projects = get_projects_by_user_id(user_id)
-
-        if len(projects) == 0:
-            await event.respond('У вас нет ни одного проекта', buttons=[
-                [Button.inline('Добавить проект', b'add_project')]
-            ])
-        else:
-            buttons = [
-                [Button.inline(str(project['name']), b'project_' + str(project['id']).encode('utf-8'))] for project in projects
-            ]
-            buttons.append([Button.inline('Добавить проект', b'add_project')])  # Добавляем кнопку "Добавить проект"
-            buttons.append([Button.inline('Назад', b'back_to_main')])
-            await event.respond('Ваши проекты:', buttons=buttons)
+        all_messages = get_message_from_profile(user_id)
+        await delete_messages(user_id, all_messages)
+        await projects_button_event(user_id, event)
 
 
 async def start_login_process(user_id, phone_number, conv):
@@ -382,23 +592,28 @@ async def start_login_process(user_id, phone_number, conv):
     try:
         if not await client.is_user_authorized():
             await client.send_code_request(phone_number)
-            await conv.send_message('Введите код из сообщения')
+            message = await conv.send_message('Введите код из сообщения')
+            update_message_id(user_id, message.id)
             code = await conv.get_response()
             await complete_login(user_id, client, phone_number, code.text, conv)
     except PhoneNumberInvalidError:
-        await conv.send_message('Код подтверждения устарел. Пожалуйста, запросите новый код и попробуйте снова.')
+        message1 = await conv.send_message('Код подтверждения устарел. Пожалуйста, запросите новый код и попробуйте снова.')
+        update_message_id(user_id, message1.id)
         if os.path.exists(session_name):
             os.remove(session_name)
     except SessionPasswordNeededError:
-        await conv.send_message('Отключите двухфакторную аутентификацию и попробуйте снова.')
+        message2 = await conv.send_message('Отключите двухфакторную аутентификацию и попробуйте снова.')
+        update_message_id(user_id, message2.id)
         if os.path.exists(session_name):
             os.remove(session_name)
     except Exception as e:
-        await conv.send_message(f'Ошибка при добавлении аккаунта: {str(e)}')
+        message3 = await conv.send_message(f'Ошибка при добавлении аккаунта: {str(e)}')
+        update_message_id(user_id, message3.id)
         if os.path.exists(session_name):
             os.remove(session_name)
     finally:
         await client.disconnect()
+
 
 async def complete_login(user_id, client, phone_number, code, conv):
     try:
@@ -406,19 +621,32 @@ async def complete_login(user_id, client, phone_number, code, conv):
         session_name = f"{phone_number}.session"
         session_str = client.session.save()  # Сохранение сессии
         random_session = session_generate()
-        add_account(user_id, phone_number, "True", random_session)
-        account_update(random_session, "True")
-        await conv.send_message('Аккаунт успешно добавлен')
+        add_account(user_id, phone_number, "False", random_session)
+        account_update("True", random_session)
+        message = await conv.send_message('Аккаунт успешно добавлен')
+        all_messages = get_message_from_profile(user_id)
+        await delete_messages(user_id, all_messages)
+        update_message_id(user_id, message.id)
+        await accounts_button(user_id, conv)  # Await the coroutine here
     except PhoneNumberInvalidError:
-        await conv.send_message('Код подтверждения неверен. Пожалуйста, попробуйте снова.')
+        message1 = await conv.send_message('Код подтверждения неверен. Пожалуйста, попробуйте снова.')
+        all_messages = get_message_from_profile(user_id)
+        await delete_messages(user_id, all_messages)
+        update_message_id(user_id, message1.id)
         if os.path.exists(session_name):
             os.remove(session_name)
     except SessionPasswordNeededError:
-        await conv.send_message('Отключите двухфакторную аутентификацию и попробуйте снова.')
+        message2 = await conv.send_message('Отключите двухфакторную аутентификацию и попробуйте снова.')
+        all_messages = get_message_from_profile(user_id)
+        await delete_messages(user_id, all_messages)
+        update_message_id(user_id, message2.id)
         if os.path.exists(session_name):
             os.remove(session_name)
     except Exception as e:
-        await conv.send_message(f'Ошибка при добавлении аккаунта: {str(e)}')
+        message3 = await conv.send_message(f'Ошибка при добавлении аккаунта: {str(e)}')
+        all_messages = get_message_from_profile(user_id)
+        await delete_messages(user_id, all_messages)
+        update_message_id(user_id, message3.id)
         if os.path.exists(session_name):
             os.remove(session_name)
     finally:
