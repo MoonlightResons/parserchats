@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import time
 
 import telebot
 from telethon import TelegramClient, events, Button
@@ -10,7 +11,8 @@ import random
 from telethon.tl.functions.messages import GetHistoryRequest, GetDialogsRequest, DeleteMessagesRequest
 from telethon.tl.types import InputPeerEmpty, Chat, Channel, PeerUser, PeerChannel, KeyboardButton, ReplyKeyboardMarkup, \
     KeyboardButtonRow
-from telethon.errors import PhoneNumberInvalidError, SessionPasswordNeededError, MessageDeleteForbiddenError
+from telethon.errors import PhoneNumberInvalidError, SessionPasswordNeededError, MessageDeleteForbiddenError, \
+    PhoneCodeExpiredError, PhoneCodeInvalidError
 
 api_id = 29302356
 api_hash = "7d7f24983b3bea974a0997c5c42a1d44"
@@ -583,11 +585,14 @@ async def callback(event):
         await delete_messages(user_id, all_messages)
         await projects_button_event(user_id, event)
 
-
 async def start_login_process(user_id, phone_number, conv):
     session_name = f"{phone_number}.session"
+    if os.path.exists(session_name):
+        os.remove(session_name)
     client = TelegramClient(session_name, api_id, api_hash)
     await client.connect()
+
+    login_successful = False  # Flag to indicate if login was successful
 
     try:
         if not await client.is_user_authorized():
@@ -595,30 +600,28 @@ async def start_login_process(user_id, phone_number, conv):
             message = await conv.send_message('Введите код из сообщения')
             update_message_id(user_id, message.id)
             code = await conv.get_response()
-            await complete_login(user_id, client, phone_number, code.text, conv)
+            login_successful = await complete_login(user_id, client, phone_number, code.text, conv)
     except PhoneNumberInvalidError:
         message1 = await conv.send_message('Код подтверждения устарел. Пожалуйста, запросите новый код и попробуйте снова.')
         update_message_id(user_id, message1.id)
-        if os.path.exists(session_name):
-            os.remove(session_name)
     except SessionPasswordNeededError:
         message2 = await conv.send_message('Отключите двухфакторную аутентификацию и попробуйте снова.')
         update_message_id(user_id, message2.id)
-        if os.path.exists(session_name):
-            os.remove(session_name)
+    except PhoneCodeExpiredError:
+        message4 = await conv.send_message('Устройство с помощью которого вы пытаетесь войти по номеру телефона '
+                                           'является временно индексированным конкретно для этого номера '
+                                           'попробуйте позже или воспользуйтесь другим устройством')
+        update_message_id(user_id, message4.id)
     except Exception as e:
         message3 = await conv.send_message(f'Ошибка при добавлении аккаунта: {str(e)}')
         update_message_id(user_id, message3.id)
-        if os.path.exists(session_name):
-            os.remove(session_name)
     finally:
-        await client.disconnect()
-
+        await disconnect_and_cleanup(client, session_name, login_successful)
 
 async def complete_login(user_id, client, phone_number, code, conv):
+    session_name = f"{phone_number}.session"
     try:
         await client.sign_in(phone_number, code)
-        session_name = f"{phone_number}.session"
         session_str = client.session.save()  # Сохранение сессии
         random_session = session_generate()
         add_account(user_id, phone_number, "False", random_session)
@@ -628,30 +631,43 @@ async def complete_login(user_id, client, phone_number, code, conv):
         await delete_messages(user_id, all_messages)
         update_message_id(user_id, message.id)
         await accounts_button(user_id, conv)  # Await the coroutine here
+        return True  # Indicate successful login
     except PhoneNumberInvalidError:
         message1 = await conv.send_message('Код подтверждения неверен. Пожалуйста, попробуйте снова.')
         all_messages = get_message_from_profile(user_id)
         await delete_messages(user_id, all_messages)
         update_message_id(user_id, message1.id)
-        if os.path.exists(session_name):
-            os.remove(session_name)
+    except PhoneCodeExpiredError:
+        message4 = await conv.send_message('Устройство с помощью которого вы пытаетесь войти по номеру телефона '
+                                           'является временно индексированным конкретно для этого номера '
+                                           'попробуйте позже или воспользуйтесь другим устройством')
+        update_message_id(user_id, message4.id)
     except SessionPasswordNeededError:
         message2 = await conv.send_message('Отключите двухфакторную аутентификацию и попробуйте снова.')
         all_messages = get_message_from_profile(user_id)
         await delete_messages(user_id, all_messages)
         update_message_id(user_id, message2.id)
-        if os.path.exists(session_name):
-            os.remove(session_name)
     except Exception as e:
         message3 = await conv.send_message(f'Ошибка при добавлении аккаунта: {str(e)}')
         all_messages = get_message_from_profile(user_id)
         await delete_messages(user_id, all_messages)
         update_message_id(user_id, message3.id)
-        if os.path.exists(session_name):
-            os.remove(session_name)
-    finally:
-        await client.disconnect()
+    return False  # Indicate unsuccessful login
 
+async def disconnect_and_cleanup(client, session_name, login_successful):
+    await client.disconnect()
+    # Wait to ensure the file is closed
+    time.sleep(1)
+    # Only delete the session file if login was unsuccessful
+    if not login_successful:
+        # Retry deleting the session file if necessary
+        for _ in range(5):
+            try:
+                if os.path.exists(session_name):
+                    os.remove(session_name)
+                break
+            except PermissionError:
+                time.sleep(1)
 
 def main():
     bot.run_until_disconnected()
